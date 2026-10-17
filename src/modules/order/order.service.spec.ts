@@ -112,3 +112,67 @@ describe('OrderService.cancel', () => {
     },
   );
 });
+
+describe('OrderService.update status transitions', () => {
+  let service: OrderService;
+  const repo = { findById: jest.fn(), update: jest.fn() };
+
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        OrderService,
+        { provide: OrderRepository, useValue: repo },
+        { provide: EscrowService, useValue: {} },
+        { provide: AuditLogService, useValue: { create: jest.fn() } },
+        { provide: PrismaService, useValue: {} },
+      ],
+    }).compile();
+    service = module.get(OrderService);
+  });
+
+  it('allows created to locked only after the escrow is funded', async () => {
+    repo.findById.mockResolvedValue({ orderStatus: 'created', escrow: { escrowStatus: 'funded' } });
+    repo.update.mockResolvedValue({ orderStatus: 'locked' });
+
+    await service.update('order-1', { orderStatus: 'locked' });
+
+    expect(repo.update).toHaveBeenCalledWith('order-1', { orderStatus: 'locked' });
+  });
+
+  it.each(['cancelled', 'expired', 'released', 'disputed'])(
+    'rejects generic created -> %s transition with stable conflict code',
+    async (orderStatus) => {
+      repo.findById.mockResolvedValue({ orderStatus: 'created', escrow: null });
+
+      await expect(service.update('order-1', { orderStatus: orderStatus as never }))
+        .rejects.toMatchObject({
+          status: 409,
+          response: expect.objectContaining({ error: 'ORDER_INVALID_TRANSITION' }),
+        });
+      expect(repo.update).not.toHaveBeenCalled();
+    },
+  );
+
+  it('cannot reopen a terminal order through generic PATCH', async () => {
+    repo.findById.mockResolvedValue({ orderStatus: 'released', escrow: { escrowStatus: 'released' } });
+
+    await expect(service.update('order-1', { orderStatus: 'created' }))
+      .rejects.toMatchObject({
+        status: 409,
+        response: expect.objectContaining({ error: 'ORDER_INVALID_TRANSITION' }),
+      });
+    expect(repo.update).not.toHaveBeenCalled();
+  });
+
+  it('requires a released escrow before releasing a locked order', async () => {
+    repo.findById.mockResolvedValue({ orderStatus: 'locked', escrow: { escrowStatus: 'funded' } });
+
+    await expect(service.update('order-1', { orderStatus: 'released' }))
+      .rejects.toMatchObject({
+        status: 409,
+        response: expect.objectContaining({ error: 'ORDER_INVALID_TRANSITION' }),
+      });
+    expect(repo.update).not.toHaveBeenCalled();
+  });
+});

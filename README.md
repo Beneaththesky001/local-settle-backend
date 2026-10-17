@@ -99,6 +99,8 @@ The API listens on port `3001` by default. The frontend should point `NEXT_PUBLI
 
 Routes have endpoint-specific validation and guards. Check the controller and DTO before relying on an endpoint's authentication or ownership behavior.
 
+`PATCH /orders/:id` accepts only escrow-backed forward transitions: `created` to `locked` when escrow is funded, and `locked` to `released` or `disputed` when escrow has the matching terminal status. Cancellation and expiration must use their dedicated flows. Terminal order states cannot be reopened through PATCH. Rejected transitions return HTTP 409 with the stable `ORDER_INVALID_TRANSITION` error code.
+
 ## Development checks
 
 ```bash

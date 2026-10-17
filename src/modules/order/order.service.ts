@@ -16,7 +16,7 @@ import {
 import { AuditLogService } from '../audit-log/audit-log.service';
 import { AuditAction, AuditResult } from '../audit-log/enums/audit-action.enum';
 import { PrismaService } from '../../../prisma/prisma.service';
-import { ORDER_STATUS } from './order.constants';
+import { ORDER_STATUS, PATCHABLE_ORDER_TRANSITIONS } from './order.constants';
 import {
   ORDER_PARTY_CONTACT_SELECT,
   OrderPartyContact,
@@ -175,6 +175,44 @@ export class OrderService {
   }
 
   async update(id: string, dto: UpdateOrderDto): Promise<Order> {
+    if (dto.orderStatus !== undefined) {
+      const current = await this.repo.findById(id);
+      if (!current) {
+        throw new AppException(
+          ErrorCode.ORDER_NOT_FOUND,
+          `Order ${id} not found`,
+        );
+      }
+
+      const allowedNextStatuses =
+        PATCHABLE_ORDER_TRANSITIONS[current.orderStatus] ?? [];
+      if (
+        dto.orderStatus !== current.orderStatus &&
+        !allowedNextStatuses.includes(dto.orderStatus)
+      ) {
+        throw new AppException(
+          ErrorCode.ORDER_INVALID_TRANSITION,
+          `Order cannot transition from "${current.orderStatus}" to "${dto.orderStatus}" through PATCH; use the dedicated cancellation or escrow flow`,
+        );
+      }
+
+      const requiredEscrowStatus: Partial<Record<order_status, escrow_status>> = {
+        locked: 'funded',
+        released: 'released',
+        disputed: 'disputed',
+      };
+      const requiredEscrow = requiredEscrowStatus[dto.orderStatus];
+      if (
+        dto.orderStatus !== current.orderStatus &&
+        (!current.escrow || current.escrow.escrowStatus !== requiredEscrow)
+      ) {
+        throw new AppException(
+          ErrorCode.ORDER_INVALID_TRANSITION,
+          `Order cannot transition to "${dto.orderStatus}" unless its escrow is "${requiredEscrow}"`,
+        );
+      }
+    }
+
     const data: Record<string, unknown> = { ...dto };
     if (dto.expiresAt) data.expiresAt = new Date(dto.expiresAt);
     const updated = (await this.repo.update(id, data)) as Order;
