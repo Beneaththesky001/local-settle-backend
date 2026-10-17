@@ -9,6 +9,7 @@ import { EscrowService } from '../escrow/escrow.service';
 import { AppException, ErrorCode } from '../../common/errors';
 import {
   Order,
+  Prisma,
   order_status,
   escrow_status,
   EscrowOnChain,
@@ -175,9 +176,11 @@ export class OrderService {
   }
 
   async update(id: string, dto: UpdateOrderDto): Promise<Order> {
+    let currentOrder: OrderWithRelations | null = null;
+    let expectedEscrowStatus: escrow_status | undefined;
     if (dto.orderStatus !== undefined) {
-      const current = await this.repo.findById(id);
-      if (!current) {
+      currentOrder = await this.repo.findById(id);
+      if (!currentOrder) {
         throw new AppException(
           ErrorCode.ORDER_NOT_FOUND,
           `Order ${id} not found`,
@@ -185,37 +188,60 @@ export class OrderService {
       }
 
       const allowedNextStatuses =
-        PATCHABLE_ORDER_TRANSITIONS[current.orderStatus] ?? [];
+        PATCHABLE_ORDER_TRANSITIONS[currentOrder.orderStatus] ?? [];
       if (
-        dto.orderStatus !== current.orderStatus &&
+        dto.orderStatus !== currentOrder.orderStatus &&
         !allowedNextStatuses.includes(dto.orderStatus)
       ) {
         throw new AppException(
           ErrorCode.ORDER_INVALID_TRANSITION,
-          `Order cannot transition from "${current.orderStatus}" to "${dto.orderStatus}" through PATCH; use the dedicated cancellation or escrow flow`,
+          `Order cannot transition from "${currentOrder.orderStatus}" to "${dto.orderStatus}" through PATCH; use the dedicated cancellation or escrow flow`,
         );
       }
 
-      const requiredEscrowStatus: Partial<Record<order_status, escrow_status>> = {
+      const requiredEscrowByOrderStatus: Partial<
+        Record<order_status, escrow_status>
+      > = {
         locked: 'funded',
         released: 'released',
         disputed: 'disputed',
       };
-      const requiredEscrow = requiredEscrowStatus[dto.orderStatus];
+      expectedEscrowStatus =
+        requiredEscrowByOrderStatus[dto.orderStatus];
       if (
-        dto.orderStatus !== current.orderStatus &&
-        (!current.escrow || current.escrow.escrowStatus !== requiredEscrow)
+        dto.orderStatus !== currentOrder.orderStatus &&
+        (!currentOrder.escrow ||
+          currentOrder.escrow.escrowStatus !== expectedEscrowStatus)
       ) {
         throw new AppException(
           ErrorCode.ORDER_INVALID_TRANSITION,
-          `Order cannot transition to "${dto.orderStatus}" unless its escrow is "${requiredEscrow}"`,
+          `Order cannot transition to "${dto.orderStatus}" unless its escrow is "${expectedEscrowStatus}"`,
         );
       }
     }
 
     const data: Record<string, unknown> = { ...dto };
     if (dto.expiresAt) data.expiresAt = new Date(dto.expiresAt);
-    const updated = (await this.repo.update(id, data)) as Order;
+    let updated: Order;
+    if (currentOrder && dto.orderStatus !== undefined) {
+      const applied = await this.repo.updateIfStatusesMatch(
+        id,
+        currentOrder.orderStatus,
+        dto.orderStatus === currentOrder.orderStatus
+          ? undefined
+          : expectedEscrowStatus,
+        data as Prisma.OrderUpdateManyMutationInput,
+      );
+      if (!applied) {
+        throw new AppException(
+          ErrorCode.ORDER_INVALID_TRANSITION,
+          'Order or escrow status changed while applying the requested transition; reload the order and retry',
+        );
+      }
+      updated = (await this.repo.findById(id)) as Order;
+    } else {
+      updated = (await this.repo.update(id, data)) as Order;
+    }
 
     // Record cancellation/expiration explicitly when the update sets the
     // order into one of those terminal statuses; other field updates

@@ -115,7 +115,11 @@ describe('OrderService.cancel', () => {
 
 describe('OrderService.update status transitions', () => {
   let service: OrderService;
-  const repo = { findById: jest.fn(), update: jest.fn() };
+  const repo = {
+    findById: jest.fn(),
+    update: jest.fn(),
+    updateIfStatusesMatch: jest.fn(),
+  };
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -133,11 +137,16 @@ describe('OrderService.update status transitions', () => {
 
   it('allows created to locked only after the escrow is funded', async () => {
     repo.findById.mockResolvedValue({ orderStatus: 'created', escrow: { escrowStatus: 'funded' } });
-    repo.update.mockResolvedValue({ orderStatus: 'locked' });
+    repo.updateIfStatusesMatch.mockResolvedValue(true);
 
     await service.update('order-1', { orderStatus: 'locked' });
 
-    expect(repo.update).toHaveBeenCalledWith('order-1', { orderStatus: 'locked' });
+    expect(repo.updateIfStatusesMatch).toHaveBeenCalledWith(
+      'order-1',
+      'created',
+      'funded',
+      { orderStatus: 'locked' },
+    );
   });
 
   it.each(['cancelled', 'expired', 'released', 'disputed'])(
@@ -174,5 +183,25 @@ describe('OrderService.update status transitions', () => {
         response: expect.objectContaining({ error: 'ORDER_INVALID_TRANSITION' }),
       });
     expect(repo.update).not.toHaveBeenCalled();
+  });
+
+  it('returns a stable conflict when status changes after validation', async () => {
+    repo.findById.mockResolvedValue({
+      orderStatus: 'created',
+      escrow: { escrowStatus: 'funded' },
+    });
+    repo.updateIfStatusesMatch.mockResolvedValue(false);
+
+    await expect(service.update('order-1', { orderStatus: 'locked' })).rejects
+      .toMatchObject({
+        status: 409,
+        response: expect.objectContaining({ error: 'ORDER_INVALID_TRANSITION' }),
+      });
+    expect(repo.updateIfStatusesMatch).toHaveBeenCalledWith(
+      'order-1',
+      'created',
+      'funded',
+      { orderStatus: 'locked' },
+    );
   });
 });
